@@ -1,0 +1,114 @@
+#include <Arduino.h>
+#include <DFRobotDFPlayerMini.h>
+
+// ESP32-S3 Audio Feather
+#define TRANSFORM_INPUT 6   // Nano D5
+#define JOKE_INPUT      9   // Nano D9
+#define JOKE_PLAYING_OUT 10 // To LED Feather D10
+
+DFRobotDFPlayerMini player;
+const int TRANSFORM_TRACK = 1;
+const int FIRST_JOKE = 7;
+const int JOKE_COUNT = 22; // 0007.mp3 through 0028.mp3
+
+int jokeOrder[JOKE_COUNT];
+int nextJokeIndex = 0;
+int lastJokePlayed = -1;
+int currentTrack = 0;
+bool audioPlaying = false;
+bool lastTransformSignal = false;
+bool lastJokeSignal = false;
+
+void shuffleJokes() {
+  for (int i = 0; i < JOKE_COUNT; ++i) jokeOrder[i] = FIRST_JOKE + i;
+  for (int i = JOKE_COUNT - 1; i > 0; --i) {
+    int j = random(i + 1);
+    int temp = jokeOrder[i]; jokeOrder[i] = jokeOrder[j]; jokeOrder[j] = temp;
+  }
+  if (JOKE_COUNT > 1 && jokeOrder[0] == lastJokePlayed) {
+    int temp = jokeOrder[0]; jokeOrder[0] = jokeOrder[1]; jokeOrder[1] = temp;
+  }
+  nextJokeIndex = 0;
+  Serial.println("Jokes shuffled");
+}
+
+void startTrack(int track, bool joke) {
+  currentTrack = track;
+  audioPlaying = true;
+  // HIGH while a joke is selected for playback; LOW otherwise.
+  digitalWrite(JOKE_PLAYING_OUT, joke ? HIGH : LOW);
+  player.playMp3Folder(track);
+  Serial.print(joke ? "JOKE: " : "TRANSFORMATION: ");
+  Serial.println(track);
+}
+
+void triggerTransformation() {
+  // Replaying transformation during its own audio is intentionally ignored.
+  if (audioPlaying && currentTrack == TRANSFORM_TRACK) return;
+  if (audioPlaying) {
+    digitalWrite(JOKE_PLAYING_OUT, LOW);
+    player.stop();
+    delay(80);
+  }
+  startTrack(TRANSFORM_TRACK, false);
+}
+
+void triggerJoke() {
+  if (audioPlaying) {
+    Serial.println("Audio busy: joke ignored");
+    return;
+  }
+  if (nextJokeIndex >= JOKE_COUNT) shuffleJokes();
+  int track = jokeOrder[nextJokeIndex++];
+  lastJokePlayed = track;
+  startTrack(track, true);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRANSFORM_INPUT, INPUT_PULLDOWN);
+  pinMode(JOKE_INPUT, INPUT_PULLDOWN);
+  pinMode(JOKE_PLAYING_OUT, OUTPUT);
+  digitalWrite(JOKE_PLAYING_OUT, LOW);
+
+  delay(2000);
+  Serial1.begin(9600);
+  if (!player.begin(Serial1, true, true)) {
+    Serial.println("DFPlayer NOT detected!");
+    while (true) delay(1000);
+  }
+  player.volume(30);
+  delay(500);
+  randomSeed(analogRead(A0));
+  shuffleJokes();
+  lastTransformSignal = digitalRead(TRANSFORM_INPUT);
+  lastJokeSignal = digitalRead(JOKE_INPUT);
+  Serial.println("Audio Feather ready: transformation + jokes");
+}
+
+void loop() {
+  // Process completion messages before accepting fresh triggers.
+  while (player.available()) {
+    uint8_t type = player.readType();
+    int value = player.read();
+    if (type == DFPlayerPlayFinished) {
+      Serial.print("Finished track: "); Serial.println(value);
+      if (audioPlaying && value == currentTrack) {
+        audioPlaying = false;
+        currentTrack = 0;
+        digitalWrite(JOKE_PLAYING_OUT, LOW);
+      }
+    }
+  }
+
+  bool transform = digitalRead(TRANSFORM_INPUT);
+  bool joke = digitalRead(JOKE_INPUT);
+  // Transformation always wins if both signals rise together.
+  bool newTransform = transform && !lastTransformSignal;
+  bool newJoke = joke && !lastJokeSignal;
+  lastTransformSignal = transform;
+  lastJokeSignal = joke;
+  if (newTransform) triggerTransformation();
+  else if (newJoke) triggerJoke();
+  delay(10);
+}
